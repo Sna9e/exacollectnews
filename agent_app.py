@@ -89,11 +89,10 @@ def search_and_extract_with_exa(query, sites_text, time_opt, exa_key, max_result
     elif time_opt == "m":
         start_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
 
-    # 🔴 魔法限定：确保全网搜索时只抓取高质量新闻和深度分析
+    # 🔴 修正后的参数：去掉了导致版本冲突的 use_autoprompt
     search_args = {
         "query": f"High quality news article, deep dive analysis, or official announcement about {query}", 
         "type": "auto", 
-        "use_autoprompt": True, 
         "num_results": max_results,
         "contents": {"text": True}
     }
@@ -115,12 +114,10 @@ def search_and_extract_with_exa(query, sites_text, time_opt, exa_key, max_result
             if text_content and len(text_content) > 100:
                 valid_count += 1
                 links.append({'href': result.url})
-                # 截断前6000字，既保留核心信息，又极大节省Token
                 full_content += f"\n\n=== SOURCE START: {result.url} ===\n{text_content[:6000]}\n=== SOURCE END ===\n"
                 
         return full_content, valid_count, links
     except Exception as e:
-        # 🔴 防瞎子机制：遇到错误直接在页面弹窗报警
         st.error(f"🚨 Exa 接口报错了: {str(e)}")
         return "", 0, []
 
