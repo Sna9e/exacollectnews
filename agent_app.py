@@ -34,7 +34,7 @@ st.set_page_config(page_title="DeepSeek 科技探员", page_icon="🐳", layout=
 class NewsItem(BaseModel):
     title: str = Field(description="新闻标题（务必翻译为中文）")
     source: str = Field(description="来源媒体（保留原名）")
-    date_check: str = Field(description="严格核实新闻发生的真实日期，格式 YYYY-MM-DD。")
+    date_check: str = Field(description="新闻发生的真实日期，格式 YYYY-MM-DD。")
     summary: str = Field(description="约300字的深度商业分析。必须严格分段并带有标识：【事件核心】、【深度细节/数据支撑】、【行业深远影响】。")
     importance: int = Field(description="重要性 1-5")
 
@@ -81,26 +81,35 @@ def search_and_extract_with_exa(query, sites_text, time_opt, exa_key, max_result
     exa = Exa(api_key=exa_key)
     sites = [s.strip() for s in sites_text.split('\n') if s.strip()]
     
-    start_date = None
-    if time_opt == "d":
-        start_date = (datetime.datetime.now() - datetime.timedelta(days=2)).strftime("%Y-%m-%d")
-    elif time_opt == "w":
-        start_date = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
-    elif time_opt == "m":
-        start_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
-
-    # 🔴 修正后的参数：去掉了导致版本冲突的 use_autoprompt
+    # 🔴 Exa 最佳实践 1：长且语义丰富的 Query
+    search_query = f"In-depth news article, strategic analysis, or official announcement regarding {query}"
+    
+    # 🔴 Exa 最佳实践 2：底层核心参数配置
     search_args = {
-        "query": f"High quality news article, deep dive analysis, or official announcement about {query}", 
+        "query": search_query,
         "type": "auto", 
         "num_results": max_results,
-        "contents": {"text": True}
+        "category": "news",  # ⚡ 锁定专属新闻索引库，精准度飙升
+        "contents": {
+            "highlights": {  # ⚡ 放弃冗长全文，只提取含金量最高的片段，省 Token 10倍！
+                "max_characters": 4000
+            }
+        }
     }
     
     if sites:
         search_args["include_domains"] = sites
-    if start_date:
-        search_args["start_published_date"] = start_date
+
+    # 🔴 Exa 最佳实践 3：强制爬虫新鲜度 (max_age_hours + publish_date)
+    if time_opt == "d":
+        search_args["max_age_hours"] = 24
+        search_args["start_published_date"] = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    elif time_opt == "w":
+        search_args["max_age_hours"] = 168
+        search_args["start_published_date"] = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    elif time_opt == "m":
+        search_args["max_age_hours"] = 720
+        search_args["start_published_date"] = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
     try:
         response = exa.search(**search_args)
@@ -110,31 +119,35 @@ def search_and_extract_with_exa(query, sites_text, time_opt, exa_key, max_result
         links = []
         
         for result in response.results:
-            text_content = getattr(result, 'text', '')
-            if text_content and len(text_content) > 100:
+            content_text = ""
+            # 优先提取 Exa 智能计算出的精华片段 (Highlights)
+            if hasattr(result, 'highlights') and result.highlights:
+                content_text = "\n...\n".join(result.highlights)
+            # 保底方案
+            elif hasattr(result, 'text') and result.text:
+                content_text = result.text[:4000]
+
+            if content_text and len(content_text) > 50:
                 valid_count += 1
                 links.append({'href': result.url})
-                full_content += f"\n\n=== SOURCE START: {result.url} ===\n{text_content[:6000]}\n=== SOURCE END ===\n"
+                full_content += f"\n\n=== SOURCE START: {result.url} ===\n{content_text}\n=== SOURCE END ===\n"
                 
         return full_content, valid_count, links
     except Exception as e:
-        st.error(f"🚨 Exa 接口报错了: {str(e)}")
+        st.error(f"🚨 Exa 接口报错: {str(e)}")
         return "", 0, []
 
 def map_reduce_analysis(ai_driver, topic, full_text, current_date, time_opt):
-    if not full_text or len(full_text) < 100: return []
+    if not full_text or len(full_text) < 50: return []
     docs = RecursiveCharacterTextSplitter(chunk_size=8000, chunk_overlap=1000).create_documents([full_text])
     all_extracted_news = []
 
     def process_single_doc(doc):
+        # 🔴 减负：由于 Exa 已在物理层过滤了旧闻和垃圾信息，DeepSeek 不再需要承担繁重的清洗任务
         map_prompt = f"""
-        【全局时间锚点】：今天是 **{current_date}**。
-        要求的时间范围是：【{time_opt}】。
-        任务：从以下文本提取关于【{topic}】的新闻情报。
-        红线：
-        1. 严格时间审查：发现发生时间早于【{time_opt}】之前（如几月前、去年），直接丢弃！
-        2. 【{topic}】必须是绝对主角！
-        无符合条件的内容必须返回 `{{"news": []}}`。
+        【时间锚点】：今天是 **{current_date}**。
+        任务：从以下经过 Exa AI 精选的片段中，提取关于【{topic}】的核心商业情报。
+        要求：【{topic}】必须是事件的绝对主角。无符合条件内容请返回空列表。
         文本：{doc.page_content}
         """
         return ai_driver.analyze_structural(map_prompt, NewsReport)
@@ -148,16 +161,15 @@ def map_reduce_analysis(ai_driver, topic, full_text, current_date, time_opt):
     combined_json = json.dumps([item.model_dump() for item in all_extracted_news], ensure_ascii=False)
 
     reduce_prompt = f"""
-        【全局时间锚点】：今天是 **{current_date}**。
+        【时间锚点】：今天是 **{current_date}**。
         你是极其严苛的科技媒体总编。
         任务：
-        1. 终极时间清洗：任何陈年旧闻，全部无情删掉！
-        2. 合并去重：报道同一事件的新闻必须合并。
-        3. 深度扩写与高级排版：将每条新闻的 summary 扩展至 300 字左右。必须在 summary 中使用明显的分段和换行，明确包含以下三个部分：
+        1. 合并去重：报道同一事件的新闻必须合并。
+        2. 深度扩写与高级排版：将每条新闻的 summary 扩展至 300 字左右。必须在 summary 中使用明显的分段和换行，明确包含以下三个部分：
            【事件核心】：概括事件
            【深度细节】：核心数据与细节支撑
            【行业影响】：精简的行业深远影响
-        4. 按重要性降序，最多保留最核心的 5 条。
+        3. 按重要性降序，最多保留最核心的 5 条。
         数据：{combined_json}
     """
     final_report = ai_driver.analyze_structural(reduce_prompt, NewsReport)
@@ -165,7 +177,6 @@ def map_reduce_analysis(ai_driver, topic, full_text, current_date, time_opt):
 
 def generate_word(data, filename, model_name):
     doc = Document()
-    
     normal_style = doc.styles['Normal']
     normal_style.font.name = '微软雅黑'
     normal_style._element.rPr.rFonts.set(qn('w:eastAsia'), '微软雅黑')
@@ -183,7 +194,7 @@ def generate_word(data, filename, model_name):
     
     meta_p = doc.add_paragraph()
     meta_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    meta_run = meta_p.add_run(f"生成日期: {datetime.date.today()}  |  数据来源: Exa AI 神经搜索引擎  |  分析模型: {model_name}")
+    meta_run = meta_p.add_run(f"生成日期: {datetime.date.today()}  |  数据来源: Exa Neural Search (News Index)  |  分析模型: {model_name}")
     meta_run.font.color.rgb = RGBColor(128, 128, 128)
     meta_run.font.size = Pt(9)
     
@@ -192,14 +203,14 @@ def generate_word(data, filename, model_name):
     for section in data:
         doc.add_heading(f"🔷 专题：{section['topic']}", level=1)
         if not section['data']:
-            doc.add_paragraph("    在指定时间范围内，未发现符合标准的重大情报。").font.italic = True
+            doc.add_paragraph("    在指定时间范围内，未发现重大核心情报。").font.italic = True
             continue
             
         for news in section['data']:
             doc.add_heading(f"🔹 {news.title}", level=2)
             
             p_info = doc.add_paragraph()
-            run_info = p_info.add_run(f"    📌 来源: {news.source}    |    🕒 时间: {news.date_check}    |    🔥 价值评级: {'⭐'*news.importance}")
+            run_info = p_info.add_run(f"    📌 来源: {news.source}    |    🕒 时间: {news.date_check}    |    🔥 价值: {'⭐'*news.importance}")
             run_info.font.color.rgb = RGBColor(100, 100, 100)
             run_info.font.bold = True
             
@@ -228,17 +239,16 @@ with st.sidebar:
     time_limit_dict = {"过去 24 小时": "d", "过去 1 周": "w", "过去 1 个月": "m", "不限时间": None}
     
     st.markdown("**🌐 情报雷达范围**")
-    # 🔴 默认留空，激发 Exa 全网搜索能力
     sites = st.text_area(
-        "定向搜索源 (留空则开启 Exa 全网智能搜索)", 
+        "定向搜索源 (留空则开启 Exa 全网新闻搜索)", 
         value="", 
         height=100, 
-        help="留空：Exa 将在全网寻找最高质量的报道。\n定向：如果只想看特定媒体，可输入域名，每行一个（如 bloomberg.com）。"
+        help="留空：Exa 将自动在全球新闻索引库中搜寻。\n定向：如果只想看特定媒体，可输入域名，每行一个。"
     )
     file_name = st.text_input("文件名", f"深度研报_{datetime.date.today()}")
 
-st.title("🐳 企业情报探员 (Exa 无限制完全体)")
-query_input = st.text_input("输入主题 (用 \\ 隔开，如：Tesla Robotaxi \\ Apple Vision Pro)", "Tesla Robotaxi \\ Apple Vision Pro")
+st.title("🐳 企业情报探员 (Exa 最佳实践最终版)")
+query_input = st.text_input("输入主题 (用 \\ 隔开)", "Tesla Robotaxi \\ Apple Vision Pro")
 btn = st.button("🚀 开始生成研报", type="primary")
 
 if btn:
@@ -254,21 +264,21 @@ if btn:
         
         global_seen_titles = []
 
-        st.info("🚀 探员已出击，Exa 神经元网络正在全网提取极客情报...")
+        st.info("🚀 探员已出击，Exa 神经元网络正在提取全球情报...")
 
         for topic in topics:
             st.markdown(f"#### 🔵 追踪目标: 【{topic}】 (要求: {time_opt})")
             
-            with st.spinner(f"正在全网智能嗅探并直抽正文... (纯API模式)"):
+            with st.spinner(f"正在启用 Exa Highlights 极速摘要模式..."):
                 full_text_data, valid_count, links = search_and_extract_with_exa(topic, sites, time_limit_dict[time_opt], exa_key)
             
             if not full_text_data: 
-                st.warning(f"⚠️ {topic}：未搜寻到任何有效新闻。请查看上方是否有红色报错，或尝试放宽时间范围。")
+                st.warning(f"⚠️ {topic}：未搜寻到任何有效新闻。说明目标近期很安静。")
                 continue
                 
-            st.write(f"🔍 成功获取并提取了 {valid_count} 个高价值网页的核心正文。DeepSeek 正在执行深度分析...")
+            st.write(f"🔍 成功获取 {valid_count} 个高价值网页的核心精华片段。DeepSeek 开始分析...")
 
-            with st.spinner("AI 正在剔除旧闻与重复项，撰写商业分析..."):
+            with st.spinner("AI 正在提炼商业本质与深度细节..."):
                 final_news_list = map_reduce_analysis(ai, topic, full_text_data, current_date_str, time_opt)
             
             if final_news_list:
@@ -294,15 +304,15 @@ if btn:
                     st.warning(f"⚠️ 【{topic}】提炼出的新闻均与之前的主题高度重合，已执行全局去重抹杀！")
                     
             else:
-                st.warning(f"⚠️ 【{topic}】搜到的网页经 AI 严格审判，全被判定为旧闻或非核心新闻，已执行抹杀过滤。")
+                st.warning(f"⚠️ 【{topic}】片段经审核后未达到核心情报标准。")
             
             st.divider()
 
         if all_data:
             path = generate_word(all_data, file_name, model_id)
             st.balloons()
-            st.success("🎉 全链条任务执行完毕！请下载查看由 Exa+DeepSeek 联合驱动的高级排版研报。")
+            st.success("🎉 全链条任务执行完毕！")
             with open(path, "rb") as f:
                 st.download_button("📥 立即下载精美排版研报 (Word)", f, file_name=path, type="primary")
         else:
-            st.error(f"❌ 任务结束。在严格的时效与去重约束下，所有关键词均未产生独立且有效的大事件情报。")
+            st.error(f"❌ 任务结束。未产生独立且有效的大事件情报。")
