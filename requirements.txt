@@ -1,0 +1,6 @@
+streamlit
+openai
+pydantic
+langchain-text-splitters
+python-docx
+exa-py
