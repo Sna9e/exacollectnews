@@ -12,7 +12,7 @@ from typing import List
 from pydantic import BaseModel, Field
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from openai import OpenAI  
-from exa_py import Exa # 🔴 新增：Exa AI 官方 SDK
+from exa_py import Exa 
 
 # ================= 1. 核心网络配置 =================
 if platform.system() == "Windows":
@@ -22,7 +22,7 @@ else:
     os.environ.pop("http_proxy", None)
     os.environ.pop("https_proxy", None)
 
-# ================= 2. 文档库引用 =================
+# ================= 2. 文档排版库引用 =================
 from docx import Document
 from docx.shared import RGBColor, Pt
 from docx.oxml.ns import qn
@@ -75,14 +75,12 @@ class EnterpriseDeepSeekDriver:
 
 # ================= 5. 核心业务函数 =================
 
-# 🔴 史诗级进化：使用 Exa AI 一次性完成“神级搜索 + 正文提取”
 def search_and_extract_with_exa(query, sites_text, time_opt, exa_key, max_results=10):
     if not exa_key: return "", 0, []
     
     exa = Exa(api_key=exa_key)
     sites = [s.strip() for s in sites_text.split('\n') if s.strip()]
     
-    # 将时间选项转化为 Exa 支持的 published_date 过滤
     start_date = None
     if time_opt == "d":
         start_date = (datetime.datetime.now() - datetime.timedelta(days=2)).strftime("%Y-%m-%d")
@@ -91,13 +89,13 @@ def search_and_extract_with_exa(query, sites_text, time_opt, exa_key, max_result
     elif time_opt == "m":
         start_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime("%Y-%m-%d")
 
-    # 构建强大的 Exa 查询参数
+    # 🔴 魔法限定：确保全网搜索时只抓取高质量新闻和深度分析
     search_args = {
-        "query": f"latest news about {query}", 
+        "query": f"High quality news article, deep dive analysis, or official announcement about {query}", 
         "type": "auto", 
-        "use_autoprompt": True, # 开启 Exa 自动扩写 Prompt 增强语义
+        "use_autoprompt": True, 
         "num_results": max_results,
-        "contents": {"text": {"max_characters": 6000}} # 🔴 直接提取前6000字正文，抛弃爬虫！
+        "contents": {"text": True}
     }
     
     if sites:
@@ -113,15 +111,17 @@ def search_and_extract_with_exa(query, sites_text, time_opt, exa_key, max_result
         links = []
         
         for result in response.results:
-            if result.text:
+            text_content = getattr(result, 'text', '')
+            if text_content and len(text_content) > 100:
                 valid_count += 1
                 links.append({'href': result.url})
-                # 直接将 Exa 提取的干净正文喂给大模型
-                full_content += f"\n\n=== SOURCE START: {result.url} ===\n{result.text}\n=== SOURCE END ===\n"
+                # 截断前6000字，既保留核心信息，又极大节省Token
+                full_content += f"\n\n=== SOURCE START: {result.url} ===\n{text_content[:6000]}\n=== SOURCE END ===\n"
                 
         return full_content, valid_count, links
     except Exception as e:
-        print(f"Exa API Error: {e}")
+        # 🔴 防瞎子机制：遇到错误直接在页面弹窗报警
+        st.error(f"🚨 Exa 接口报错了: {str(e)}")
         return "", 0, []
 
 def map_reduce_analysis(ai_driver, topic, full_text, current_date, time_opt):
@@ -168,10 +168,12 @@ def map_reduce_analysis(ai_driver, topic, full_text, current_date, time_opt):
 
 def generate_word(data, filename, model_name):
     doc = Document()
+    
     normal_style = doc.styles['Normal']
     normal_style.font.name = '微软雅黑'
     normal_style._element.rPr.rFonts.set(qn('w:eastAsia'), '微软雅黑')
     normal_style.font.size = Pt(10.5) 
+    
     for i in range(1, 4):
         h_style = doc.styles[f'Heading {i}']
         h_style.font.name = '微软雅黑'
@@ -198,6 +200,7 @@ def generate_word(data, filename, model_name):
             
         for news in section['data']:
             doc.add_heading(f"🔹 {news.title}", level=2)
+            
             p_info = doc.add_paragraph()
             run_info = p_info.add_run(f"    📌 来源: {news.source}    |    🕒 时间: {news.date_check}    |    🔥 价值评级: {'⭐'*news.importance}")
             run_info.font.color.rgb = RGBColor(100, 100, 100)
@@ -219,9 +222,7 @@ def generate_word(data, filename, model_name):
 with st.sidebar:
     st.header("🐳 DeepSeek 控制台")
     api_key = st.text_input("DeepSeek API Key", type="password")
-    
-    # 🔴 更换为 Exa API Key
-    exa_key = st.text_input("Exa AI API Key (必填)", type="password", help="去 dashboard.exa.ai 免费获取此 Key，体验神级语义搜索与正文提取！")
+    exa_key = st.text_input("Exa AI API Key (必填)", type="password", help="去 dashboard.exa.ai 免费获取。")
     
     model_id = st.selectbox("模型", ["deepseek-chat"], index=0)
     st.divider()
@@ -229,12 +230,18 @@ with st.sidebar:
     time_opt = st.selectbox("时间范围（绝对严控）", ["过去 24 小时", "过去 1 周", "过去 1 个月", "不限时间"], index=0)
     time_limit_dict = {"过去 24 小时": "d", "过去 1 周": "w", "过去 1 个月": "m", "不限时间": None}
     
-    st.markdown("**垂直情报源雷达**")
-    sites = st.text_area("重点搜索源", "techcrunch.com\ntheverge.com\nengadget.com\ncnet.com\nbloomberg.com/technology\nelectrek.co\ninsideevs.com\nroadtovr.com\nuploadvr.com\n36kr.com\nithome.com\nhuxiu.com\ngeekpark.net\nvrtuoluo.cn\nd1ev.com", height=250)
+    st.markdown("**🌐 情报雷达范围**")
+    # 🔴 默认留空，激发 Exa 全网搜索能力
+    sites = st.text_area(
+        "定向搜索源 (留空则开启 Exa 全网智能搜索)", 
+        value="", 
+        height=100, 
+        help="留空：Exa 将在全网寻找最高质量的报道。\n定向：如果只想看特定媒体，可输入域名，每行一个（如 bloomberg.com）。"
+    )
     file_name = st.text_input("文件名", f"深度研报_{datetime.date.today()}")
 
-st.title("🐳 企业情报探员 (Exa 智能体版)")
-query_input = st.text_input("输入主题 (用 \\ 隔开，外媒源建议用英文如：Google \\ Apple)", "Tesla Robotaxi \\ Apple Vision Pro")
+st.title("🐳 企业情报探员 (Exa 无限制完全体)")
+query_input = st.text_input("输入主题 (用 \\ 隔开，如：Tesla Robotaxi \\ Apple Vision Pro)", "Tesla Robotaxi \\ Apple Vision Pro")
 btn = st.button("🚀 开始生成研报", type="primary")
 
 if btn:
@@ -250,17 +257,16 @@ if btn:
         
         global_seen_titles = []
 
-        st.info("🚀 探员已出击，Exa 神经元网络正在提取全球情报...")
+        st.info("🚀 探员已出击，Exa 神经元网络正在全网提取极客情报...")
 
         for topic in topics:
             st.markdown(f"#### 🔵 追踪目标: 【{topic}】 (要求: {time_opt})")
             
-            with st.spinner(f"正在全网智能嗅探并直抽正文... (无需爬虫)"):
-                # 🔴 直接一步到位，获取满血正文！
+            with st.spinner(f"正在全网智能嗅探并直抽正文... (纯API模式)"):
                 full_text_data, valid_count, links = search_and_extract_with_exa(topic, sites, time_limit_dict[time_opt], exa_key)
             
             if not full_text_data: 
-                st.warning(f"⚠️ {topic}：未搜寻到任何有效新闻。说明目标近期很安静或 Exa Key 有误！")
+                st.warning(f"⚠️ {topic}：未搜寻到任何有效新闻。请查看上方是否有红色报错，或尝试放宽时间范围。")
                 continue
                 
             st.write(f"🔍 成功获取并提取了 {valid_count} 个高价值网页的核心正文。DeepSeek 正在执行深度分析...")
