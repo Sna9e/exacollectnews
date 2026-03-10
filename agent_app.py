@@ -6,13 +6,14 @@ import datetime
 import concurrent.futures
 import platform
 import difflib
-import urllib.request
 from typing import List
 
 # ================= 0. 核心库引用 =================
 from pydantic import BaseModel, Field
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from openai import OpenAI  
+# 🔴 坚决拥抱官方 SDK，穿透 Cloudflare 防火墙！
+from exa_py import Exa 
 
 # ================= 1. 核心网络配置 =================
 if platform.system() == "Windows":
@@ -75,75 +76,66 @@ class EnterpriseDeepSeekDriver:
 
 # ================= 5. 核心业务函数 =================
 
-# 🔴 彻底抛弃 SDK，使用原生 HTTP 请求完美复刻官方 JSON 最佳实践
 def search_and_extract_with_exa(query, sites_text, time_opt, exa_key, max_results=10):
     if not exa_key: return "", 0, []
+    
+    exa = Exa(api_key=exa_key)
     sites = [s.strip() for s in sites_text.split('\n') if s.strip()]
     
-    url = "https://api.exa.ai/search"
+    # 构建高规格查询语义
+    search_query = f"In-depth news article, strategic analysis, or official announcement regarding {query}"
     
-    # 🔴 Exa 最佳实践：构建丰富的语义 Payload
-    payload = {
-        "query": f"In-depth news article, strategic analysis, or official announcement regarding {query}",
+    # 🔴 严格对齐 SDK 官方文档的合法参数字典
+    search_args = {
+        "query": search_query,
         "type": "auto", 
-        "category": "news", # ⚡ 锁定专属新闻索引库
-        "numResults": max_results,
+        "num_results": max_results, # 必须使用蛇形命名 num_results [cite: 10]
+        "category": "news", # 锁定新闻类目过滤垃圾 [cite: 14]
         "contents": {
-            "highlights": {  # ⚡ 启用 Highlights 模式，极大降低 Token 消耗
-                "maxCharacters": 4000
+            "highlights": { # 最佳实践：10倍效率 Token 节省 [cite: 13]
+                "max_characters": 4000 
             }
         }
     }
     
     if sites:
-        payload["includeDomains"] = sites
+        search_args["include_domains"] = sites
 
-    # 🔴 Exa 最佳实践：强行介入底层 maxAgeHours
+    # 🔴 关键修复：抛弃 maxAgeHours，使用 SDK 官方支持的 start_published_date [cite: 10]
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
     if time_opt == "d":
-        payload["maxAgeHours"] = 24
+        search_args["start_published_date"] = (now_utc - datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     elif time_opt == "w":
-        payload["maxAgeHours"] = 168
+        search_args["start_published_date"] = (now_utc - datetime.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     elif time_opt == "m":
-        payload["maxAgeHours"] = 720
-
-    headers = {
-        "accept": "application/json",
-        "content-type": "application/json",
-        "x-api-key": exa_key
-    }
+        search_args["start_published_date"] = (now_utc - datetime.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
     try:
-        data = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(url, data=data, headers=headers)
-        resp = json.loads(urllib.request.urlopen(req, timeout=30).read().decode('utf-8'))
+        response = exa.search(**search_args)
         
         full_content = ""
         valid_count = 0
         links = []
         
-        for result in resp.get('results', []):
+        for result in response.results:
             content_text = ""
-            highlights = result.get('highlights', [])
             
-            # 优先拼接极度纯净的 Highlights 文本
-            if highlights:
-                content_text = "\n...\n".join(highlights)
-            # 保底方案
-            else:
-                content_text = result.get('text', '')[:4000]
+            # 提取 Highlights 列表并拼接
+            if hasattr(result, 'highlights') and result.highlights:
+                content_text = "\n...\n".join(result.highlights)
+            # 保底回退：如果没抓到 Highlights，尝试抓 text
+            elif hasattr(result, 'text') and result.text:
+                content_text = result.text[:4000]
 
             if content_text and len(content_text) > 50:
                 valid_count += 1
-                links.append({'href': result.get('url', '')})
-                full_content += f"\n\n=== SOURCE START: {result.get('url', '')} ===\n{content_text}\n=== SOURCE END ===\n"
+                links.append({'href': result.url})
+                full_content += f"\n\n=== SOURCE START: {result.url} ===\n{content_text}\n=== SOURCE END ===\n"
                 
         return full_content, valid_count, links
-    except urllib.error.HTTPError as e:
-        error_msg = e.read().decode('utf-8')
-        st.error(f"🚨 Exa API 拒绝请求: {e.code} - {error_msg}")
-        return "", 0, []
     except Exception as e:
-        st.error(f"🚨 发生未知错误: {str(e)}")
+        # SDK 会自动捕获并打印出真实的错误
+        st.error(f"🚨 Exa API 报错: {str(e)}")
         return "", 0, []
 
 def map_reduce_analysis(ai_driver, topic, full_text, current_date, time_opt):
@@ -152,7 +144,7 @@ def map_reduce_analysis(ai_driver, topic, full_text, current_date, time_opt):
     all_extracted_news = []
 
     def process_single_doc(doc):
-        # 🔴 彻底减负：无需再警告 DeepSeek 过滤旧闻，因为 Exa 已经把旧闻杀光了！
+        # Exa 已物理过滤旧闻，无需再给大模型上压力
         map_prompt = f"""
         【时间锚点】：今天是 **{current_date}**。
         任务：从以下经过 Exa AI 神经搜索引擎精炼的 Highlights 片段中，提取关于【{topic}】的核心商业情报。
